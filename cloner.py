@@ -260,19 +260,26 @@ async def clone_forum(client, source_id, progress_cb,
 
     # 3) Copy messages topic-by-topic, in chronological order.
     # A failure in one topic never aborts the whole clone.
+    copyable = [t for t in topics if t.id in topic_map]
+    topics_total = len(copyable)
     total = 0
-    for t in topics:
-        if t.id not in topic_map:
-            continue
+    done = 0
+    for t in copyable:
         dest_topic = topic_map.get(t.id)
+        count = 0
         try:
             count = await _forward_topic_messages(
                 client, source, dest, t.id, dest_topic, sleep_between)
+            total += count
         except Exception as e:
             skipped.append(f"messages copy '{t.title}': {e}")
-            continue
-        total += count
+        done += 1
         await progress_cb("messages", {
-            "title": t.title, "count": count, "total": total})
+            "title": t.title,
+            "count": count,
+            "total": total,
+            "index": done,
+            "topics_total": topics_total,
+        })
 
     return dest, total, skipped

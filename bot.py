@@ -57,6 +57,16 @@ HELP_TEXT = (
 )
 
 
+def _progress_bar(done, total, width=14):
+    """Render a text progress bar like '▰▰▰▱▱▱▱▱▱▱▱▱▱▱ 21%'."""
+    if not total or total <= 0:
+        total = 1
+    done = max(0, min(done, total))
+    filled = int(round(width * done / total))
+    pct = int(round(100 * done / total))
+    return "▰" * filled + "▱" * (width - filled) + f"  {pct}%"
+
+
 # --------------------------------------------------------------------------- #
 # Command handlers
 # --------------------------------------------------------------------------- #
@@ -245,14 +255,19 @@ async def _handle_source(event, uid, text):
     async def progress(stage, info):
         try:
             if stage == "create":
-                await status.edit(f"Naya group bana raha hoon: "
+                await status.edit(f"🆕 Naya group bana raha hoon: "
                                   f"**{info['title']}**")
             elif stage == "topic":
-                await status.edit(f"Topic bana: {info['title']}")
+                await status.edit(f"🧵 Topic bana: {info['title']}")
             elif stage == "messages":
+                bar = _progress_bar(info["index"], info["topics_total"])
                 await status.edit(
-                    f"Topic **{info['title']}** copy hua "
-                    f"({info['count']} msgs).\nTotal ab tak: {info['total']}")
+                    f"📋 Cloning...\n\n"
+                    f"{bar}\n"
+                    f"Topics: {info['index']}/{info['topics_total']}\n"
+                    f"Abhi hua: **{info['title']}** ({info['count']} msgs)\n"
+                    f"Total messages: **{info['total']}**"
+                )
         except Exception:
             pass
 
