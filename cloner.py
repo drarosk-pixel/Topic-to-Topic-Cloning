@@ -224,44 +224,55 @@ async def clone_forum(client, source_id, progress_cb,
     topics = await get_all_topics(client, source)
     topics = list(reversed(topics))
 
+    create_cls = _resolve_request(
+        functions.channels, "CreateForumTopicRequest", "CreateForumTopic")
+    edit_cls = _resolve_request(
+        functions.channels, "EditForumTopicRequest", "EditForumTopic")
+
     topic_map = {}  # source topic id -> dest topic id
+    skipped = []    # topics we could not fully process
     for t in topics:
         if t.id == 1:
             # General topic already exists in every forum (id 1).
             topic_map[1] = 1
             if t.title and t.title != "General":
                 try:
-                    edit_cls = _resolve_request(
-                        functions.channels,
-                        "EditForumTopicRequest", "EditForumTopic")
-                    await _flood(lambda edit_cls=edit_cls, t=t: client(_mk(
+                    await _flood(lambda t=t: client(_mk(
                         edit_cls, channel=dest, topic_id=1, title=t.title)))
-                except RPCError:
+                except Exception:
                     pass
             continue
 
-        create_cls = _resolve_request(
-            functions.channels, "CreateForumTopicRequest", "CreateForumTopic")
-        created = await _flood(lambda create_cls=create_cls, t=t: client(_mk(
-            create_cls,
-            channel=dest,
-            title=t.title,
-            icon_color=t.icon_color,
-            icon_emoji_id=t.icon_emoji_id,
-            random_id=helpers.generate_random_long(),
-        )))
-        topic_map[t.id] = _extract_topic_id(created)
-        await progress_cb("topic", {"title": t.title})
+        try:
+            created = await _flood(lambda t=t: client(_mk(
+                create_cls,
+                channel=dest,
+                title=t.title,
+                icon_color=t.icon_color,
+                icon_emoji_id=t.icon_emoji_id,
+                random_id=helpers.generate_random_long(),
+            )))
+            topic_map[t.id] = _extract_topic_id(created)
+            await progress_cb("topic", {"title": t.title})
+        except Exception as e:
+            skipped.append(f"topic banate waqt '{t.title}': {e}")
         await asyncio.sleep(sleep_per_topic)
 
     # 3) Copy messages topic-by-topic, in chronological order.
+    # A failure in one topic never aborts the whole clone.
     total = 0
     for t in topics:
+        if t.id not in topic_map:
+            continue
         dest_topic = topic_map.get(t.id)
-        count = await _forward_topic_messages(
-            client, source, dest, t.id, dest_topic, sleep_between)
+        try:
+            count = await _forward_topic_messages(
+                client, source, dest, t.id, dest_topic, sleep_between)
+        except Exception as e:
+            skipped.append(f"messages copy '{t.title}': {e}")
+            continue
         total += count
         await progress_cb("messages", {
             "title": t.title, "count": count, "total": total})
 
-    return dest, total
+    return dest, total, skipped

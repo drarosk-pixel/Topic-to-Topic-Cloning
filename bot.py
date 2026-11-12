@@ -257,7 +257,7 @@ async def _handle_source(event, uid, text):
             pass
 
     try:
-        dest, total = await clone_forum(
+        dest, total, skipped = await clone_forum(
             client, source, progress,
             sleep_between=config.SLEEP_BETWEEN,
             sleep_per_topic=config.SLEEP_PER_TOPIC,
@@ -266,11 +266,15 @@ async def _handle_source(event, uid, text):
         await event.respond(f"Error aa gaya: `{e}`")
         return
 
-    await event.respond(
+    msg = (
         f"✅ Done!\nNaya group: **{dest.title}**\n"
         f"Total messages copy hue: **{total}**\n\n"
         f"Group aapke account me khul gaya hoga (aap owner ho)."
     )
+    if skipped:
+        details = "\n".join(f"• {s}" for s in skipped[:10])
+        msg += f"\n\n⚠️ {len(skipped)} cheezein skip hui:\n{details}"
+    await event.respond(msg)
 
 
 # --------------------------------------------------------------------------- #
