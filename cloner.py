@@ -25,18 +25,46 @@ from telethon.tl import functions, types
 from telethon.errors import FloodWaitError, RPCError
 
 
-async def _enable_forum(client, dest):
-    """Enable forum/topics on a channel across Telethon layer versions.
+def _resolve_request(module, *candidate_names):
+    """Find a raw request class by trying several possible names.
 
-    Newer Telegram layers added a required `tabs` field to
-    channels.toggleForum; older ones only have `enabled`. We inspect the
-    constructor so the same code works on both.
+    Telethon renames/moves generated classes between versions (e.g. the
+    `Request` suffix was dropped in v2). We try each candidate and, if none
+    exist, raise an error that lists the Forum-related names actually present
+    so the real name can be identified.
     """
-    req_cls = functions.channels.ToggleForumRequest
-    kwargs = {"channel": dest, "enabled": True}
-    if "tabs" in inspect.signature(req_cls.__init__).parameters:
-        kwargs["tabs"] = False  # classic topic-list layout (not tab bar)
-    await _flood(lambda: client(req_cls(**kwargs)))
+    for name in candidate_names:
+        cls = getattr(module, name, None)
+        if cls is not None:
+            return cls
+    available = [a for a in dir(module) if "Forum" in a]
+    raise RuntimeError(
+        f"Request class {candidate_names} nahi mila is Telethon version me. "
+        f"Module me ye Forum-related naam hain: {available}"
+    )
+
+
+def _mk(cls, **kwargs):
+    """Build a request, dropping kwargs the installed version doesn't accept.
+
+    Also auto-fills a required `tabs` arg (newer channels.toggleForum) when
+    the signature demands it and the caller didn't pass one.
+    """
+    params = inspect.signature(cls.__init__).parameters
+    accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD
+                         for p in params.values())
+    if not accepts_var_kw:
+        kwargs = {k: v for k, v in kwargs.items() if k in params}
+    if "tabs" in params and "tabs" not in kwargs:
+        kwargs["tabs"] = False
+    return cls(**kwargs)
+
+
+async def _enable_forum(client, dest):
+    """Enable forum/topics on a channel across Telethon layer versions."""
+    cls = _resolve_request(functions.channels,
+                           "ToggleForumRequest", "ToggleForum")
+    await _flood(lambda: client(_mk(cls, channel=dest, enabled=True)))
 
 
 async def _flood(factory, retries: int = 5):
@@ -73,12 +101,15 @@ def _extract_topic_id(updates) -> int:
 
 async def get_all_topics(client, channel):
     """Return every ForumTopic in `channel`, newest-first (Telegram order)."""
+    cls = _resolve_request(functions.channels,
+                           "GetForumTopicsRequest", "GetForumTopics")
     topics = []
     offset_date = 0
     offset_id = 0
     offset_topic = 0
     while True:
-        res = await _flood(lambda: client(functions.channels.GetForumTopicsRequest(
+        res = await _flood(lambda: client(_mk(
+            cls,
             channel=channel,
             q=None,
             offset_date=offset_date,
@@ -136,17 +167,18 @@ async def _forward_topic_messages(client, source, dest, src_topic_id,
             ids = [m.id]
             i += 1
 
-        await _flood(lambda ids=ids, top=top: client(
-            functions.messages.ForwardMessagesRequest(
-                from_peer=source,
-                to_peer=dest,
-                id=ids,
-                random_id=[helpers.generate_random_long() for _ in ids],
-                top_msg_id=top,
-                drop_author=True,          # clean copy, no "forwarded from"
-                drop_media_captions=False,  # keep captions exactly
-            )
-        ))
+        fwd_cls = _resolve_request(functions.messages,
+                                   "ForwardMessagesRequest", "ForwardMessages")
+        await _flood(lambda ids=ids, top=top, fwd_cls=fwd_cls: client(_mk(
+            fwd_cls,
+            from_peer=source,
+            to_peer=dest,
+            id=ids,
+            random_id=[helpers.generate_random_long() for _ in ids],
+            top_msg_id=top,
+            drop_author=True,          # clean copy, no "forwarded from"
+            drop_media_captions=False,  # keep captions exactly
+        )))
         copied += len(ids)
         await asyncio.sleep(sleep_between)
     return copied
@@ -199,21 +231,25 @@ async def clone_forum(client, source_id, progress_cb,
             topic_map[1] = 1
             if t.title and t.title != "General":
                 try:
-                    await _flood(lambda t=t: client(
-                        functions.channels.EditForumTopicRequest(
-                            channel=dest, topic_id=1, title=t.title)))
+                    edit_cls = _resolve_request(
+                        functions.channels,
+                        "EditForumTopicRequest", "EditForumTopic")
+                    await _flood(lambda edit_cls=edit_cls, t=t: client(_mk(
+                        edit_cls, channel=dest, topic_id=1, title=t.title)))
                 except RPCError:
                     pass
             continue
 
-        created = await _flood(lambda t=t: client(
-            functions.channels.CreateForumTopicRequest(
-                channel=dest,
-                title=t.title,
-                icon_color=t.icon_color,
-                icon_emoji_id=t.icon_emoji_id,
-                random_id=helpers.generate_random_long(),
-            )))
+        create_cls = _resolve_request(
+            functions.channels, "CreateForumTopicRequest", "CreateForumTopic")
+        created = await _flood(lambda create_cls=create_cls, t=t: client(_mk(
+            create_cls,
+            channel=dest,
+            title=t.title,
+            icon_color=t.icon_color,
+            icon_emoji_id=t.icon_emoji_id,
+            random_id=helpers.generate_random_long(),
+        )))
         topic_map[t.id] = _extract_topic_id(created)
         await progress_cb("topic", {"title": t.title})
         await asyncio.sleep(sleep_per_topic)
