@@ -74,13 +74,28 @@ def _resolve_request(module, *candidate_names):
     )
 
 
-def _mk(cls, **kwargs):
-    """Build a request, dropping kwargs the installed version doesn't accept.
+# Parameter names that mean the same thing across Telethon versions.
+# e.g. forum requests use `channel` in some versions and `peer` in others.
+_ALIAS_GROUPS = [("channel", "peer")]
 
-    Also auto-fills a required `tabs` arg (newer channels.toggleForum) when
-    the signature demands it and the caller didn't pass one.
+
+def _mk(cls, **kwargs):
+    """Build a request, adapting to the installed version's signature.
+
+    - Maps renamed params across versions (e.g. channel <-> peer).
+    - Drops kwargs the class doesn't accept.
+    - Auto-fills a required `tabs` arg (newer channels.toggleForum).
     """
     params = inspect.signature(cls.__init__).parameters
+
+    # Resolve renamed parameters: if we passed one name but the class wants
+    # the other, copy the value over to the name it expects.
+    for a, b in _ALIAS_GROUPS:
+        if a in kwargs and a not in params and b in params and b not in kwargs:
+            kwargs[b] = kwargs[a]
+        elif b in kwargs and b not in params and a in params and a not in kwargs:
+            kwargs[a] = kwargs[b]
+
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD
                          for p in params.values())
     if not accepts_var_kw:
