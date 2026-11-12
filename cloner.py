@@ -18,10 +18,25 @@ Small deliberate sleeps between batches keep us well under the limits.
 """
 
 import asyncio
+import inspect
 
 from telethon import helpers
 from telethon.tl import functions, types
 from telethon.errors import FloodWaitError, RPCError
+
+
+async def _enable_forum(client, dest):
+    """Enable forum/topics on a channel across Telethon layer versions.
+
+    Newer Telegram layers added a required `tabs` field to
+    channels.toggleForum; older ones only have `enabled`. We inspect the
+    constructor so the same code works on both.
+    """
+    req_cls = functions.channels.ToggleForumRequest
+    kwargs = {"channel": dest, "enabled": True}
+    if "tabs" in inspect.signature(req_cls.__init__).parameters:
+        kwargs["tabs"] = False  # classic topic-list layout (not tab bar)
+    await _flood(lambda: client(req_cls(**kwargs)))
 
 
 async def _flood(factory, retries: int = 5):
@@ -171,8 +186,7 @@ async def clone_forum(client, source_id, progress_cb,
         megagroup=True,
     )))
     dest = res.chats[0]
-    await _flood(lambda: client(functions.channels.ToggleForumRequest(
-        channel=dest, enabled=True)))
+    await _enable_forum(client, dest)
 
     # 2) Recreate topics (oldest-first so numbering feels natural).
     topics = await get_all_topics(client, source)
