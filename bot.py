@@ -311,6 +311,8 @@ async def _restore_sessions():
 
 
 async def main():
+    import telethon
+    print(f"Telethon version: {getattr(telethon, '__version__', '?')}")
     await _restore_sessions()
     await bot.start(bot_token=config.BOT_TOKEN)
     me = await bot.get_me()

@@ -26,21 +26,51 @@ from telethon.errors import FloodWaitError, RPCError
 
 
 def _resolve_request(module, *candidate_names):
-    """Find a raw request class by trying several possible names.
+    """Find a raw request class by name, searching the whole functions tree.
 
-    Telethon renames/moves generated classes between versions (e.g. the
-    `Request` suffix was dropped in v2). We try each candidate and, if none
-    exist, raise an error that lists the Forum-related names actually present
-    so the real name can be identified.
+    Telethon renames/moves generated classes between versions. We first try
+    the given module, then every submodule under telethon.tl.functions. If
+    still not found, we raise a clear error with the installed Telethon
+    version and the Forum-related names we actually see, so the problem can
+    be pinpointed (usually a broken/incomplete Telethon install).
     """
     for name in candidate_names:
         cls = getattr(module, name, None)
         if cls is not None:
             return cls
-    available = [a for a in dir(module) if "Forum" in a]
+
+    # Fallback: scan every submodule of telethon.tl.functions
+    import importlib
+    import pkgutil
+    import telethon.tl.functions as _F
+    for _finder, modname, _ispkg in pkgutil.iter_modules(_F.__path__):
+        try:
+            sub = importlib.import_module(f"telethon.tl.functions.{modname}")
+        except Exception:
+            continue
+        for name in candidate_names:
+            cls = getattr(sub, name, None)
+            if cls is not None:
+                return cls
+
+    # Still nothing -> report version + what forum classes exist anywhere.
+    import telethon
+    found = set()
+    for _finder, modname, _ispkg in pkgutil.iter_modules(_F.__path__):
+        try:
+            sub = importlib.import_module(f"telethon.tl.functions.{modname}")
+        except Exception:
+            continue
+        for a in dir(sub):
+            if "Forum" in a or "Topic" in a:
+                found.add(f"{modname}.{a}")
     raise RuntimeError(
-        f"Request class {candidate_names} nahi mila is Telethon version me. "
-        f"Module me ye Forum-related naam hain: {available}"
+        f"Request class {candidate_names} Telethon me nahi mila. "
+        f"Telethon version: {getattr(telethon, '__version__', '?')}. "
+        f"Poore functions tree me ye Forum/Topic classes mile: "
+        f"{sorted(found) or 'KUCH BHI NAHI'}. "
+        f"Iska matlab Telethon adhoora/purana install hai - reinstall karo: "
+        f"pip install -U --force-reinstall --no-cache-dir telethon"
     )
 
 
