@@ -1,0 +1,13 @@
+# Secrets & sessions — NEVER commit these
+.env
+sessions.json
+sessions.json.tmp
+*.session
+*.session-journal
+bot_session*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
