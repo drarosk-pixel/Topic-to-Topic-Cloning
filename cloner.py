@@ -193,11 +193,13 @@ async def _forward_group(client, source, dest, group, top):
     return len(ids)
 
 
-async def _copy_group(client, dest, group, top, transform):
+async def _copy_group(client, source, dest, group, top, transform):
     """Re-send a message/album with a transformed caption.
 
     Media is reused by reference (no download/upload). Only the caption text
-    is rebuilt through `transform`.
+    is rebuilt through `transform`. If the message can't be re-sent (e.g. a
+    poll / location that isn't a file), it is forwarded instead so nothing is
+    lost (its text, if any, just won't be edited).
     """
     # Caption comes from whichever message in the group carries text.
     raw = ""
@@ -211,22 +213,28 @@ async def _copy_group(client, dest, group, top, transform):
               if getattr(m, "media", None) is not None
               and not isinstance(m.media, types.MessageMediaWebPage)]
 
-    if medias:
-        if len(medias) == 1:
-            await _flood(lambda: client.send_file(
-                dest, medias[0], caption=new_text, reply_to=top))
-        else:
-            caps = [new_text] + [""] * (len(medias) - 1)
-            await _flood(lambda: client.send_file(
-                dest, medias, caption=caps, reply_to=top))
-        return len(group)
+    try:
+        if medias:
+            if len(medias) == 1:
+                await _flood(lambda: client.send_file(
+                    dest, medias[0], caption=new_text, reply_to=top))
+            else:
+                caps = [new_text] + [""] * (len(medias) - 1)
+                await _flood(lambda: client.send_file(
+                    dest, medias, caption=caps, reply_to=top))
+            return len(group)
 
-    # Text-only message (or link-preview message): nothing to send if empty.
-    if not new_text.strip():
-        return 0
-    await _flood(lambda: client.send_message(
-        dest, new_text, reply_to=top, link_preview=False))
-    return 1
+        # Text-only message (or link-preview message): skip if empty.
+        if not new_text.strip():
+            return 0
+        await _flood(lambda: client.send_message(
+            dest, new_text, reply_to=top, link_preview=False))
+        return 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Re-send not possible for this content -> forward it as-is.
+        return await _forward_group(client, source, dest, group, top)
 
 
 async def _forward_topic_messages(client, source, dest, src_topic_id,
@@ -271,7 +279,8 @@ async def _forward_topic_messages(client, source, dest, src_topic_id,
         if transform is None:
             copied += await _forward_group(client, source, dest, group, top)
         else:
-            copied += await _copy_group(client, dest, group, top, transform)
+            copied += await _copy_group(client, source, dest, group, top,
+                                        transform)
         await asyncio.sleep(sleep_between)
     return copied
 

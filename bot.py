@@ -82,6 +82,18 @@ HELP_TEXT = (
 )
 
 
+async def _safe_respond(event, text):
+    """Respond with markdown, falling back to plain text if parsing fails
+    (e.g. a group title contains stray * or _ characters)."""
+    try:
+        await event.respond(text)
+    except Exception:
+        try:
+            await event.respond(text, parse_mode=None)
+        except Exception:
+            pass
+
+
 def _progress_bar(done, total, width=14):
     """Render a text progress bar like '▰▰▰▱▱▱▱▱▱▱▱▱▱▱ 21%'."""
     if not total or total <= 0:
@@ -135,6 +147,13 @@ async def cmd_login(event):
         await event.respond("Aap already logged in ho. Seedha /clone bhejo, "
                             "ya pehle /logout karo.")
         return
+    # Drop a stale half-finished login attempt, if any.
+    old = login_tmp.pop(uid, None)
+    if old is not None:
+        try:
+            await old.disconnect()
+        except Exception:
+            pass
     client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
     await client.connect()
     login_tmp[uid] = client
@@ -364,6 +383,11 @@ async def _handle_phone(event, uid, st, text):
         await event.respond("Ye number invalid laga. Country code ke saath "
                             "dubara bhejo (jaise +91...).")
         return
+    except Exception as e:
+        await _safe_respond(event, f"Code bhejne me dikkat: {e}\n"
+                                   f"Dubara /login try karo.")
+        user_states.pop(uid, None)
+        return
     st["phone"] = phone
     st["hash"] = sent.phone_code_hash
     st["step"] = "await_code"
@@ -399,6 +423,11 @@ async def _handle_code(event, uid, st, text):
         user_states.pop(uid, None)
         await event.respond("Code expire ho gaya. Dubara /login karo.")
         return
+    except Exception as e:
+        user_states.pop(uid, None)
+        await _safe_respond(event, f"Login me dikkat: {e}\n"
+                                   f"Dubara /login try karo.")
+        return
     await _finish_login(event, uid)
 
 
@@ -412,6 +441,11 @@ async def _handle_password(event, uid, st, text):
         await client.sign_in(password=text)
     except PasswordHashInvalidError:
         await event.respond("Password galat hai. Dubara bhejo.")
+        return
+    except Exception as e:
+        user_states.pop(uid, None)
+        await _safe_respond(event, f"Login me dikkat: {e}\n"
+                                   f"Dubara /login try karo.")
         return
     await _finish_login(event, uid)
 
@@ -443,10 +477,13 @@ async def _handle_source(event, uid, text):
                             "Use /cancel karo ya khatam hone do.")
         return
 
-    raw = text.strip().split()[0]
-    source = raw
-    if re.fullmatch(r"-?\d+", raw):
-        source = int(raw)
+    parts = (text or "").split()
+    if not parts:
+        user_states[uid] = {"step": "await_source"}  # stay in this step
+        await event.respond("Group ki id text me bhejo (jaise `-1004360638630`).")
+        return
+    raw = parts[0]
+    source = int(raw) if re.fullmatch(r"-?\d+", raw) else raw
 
     # Build the caption transform from this user's rules (if any).
     r = _get_rules(uid)
@@ -497,15 +534,12 @@ async def _run_clone(event, uid, client, source, transform, mode_note):
                 transform=transform,
             )
         except asyncio.CancelledError:
-            try:
-                await event.respond(
-                    "⏹️ Clone cancel ho gaya. Jo adhoora group bana wo aap "
-                    "delete kar sakte ho.")
-            except Exception:
-                pass
+            await _safe_respond(
+                event, "⏹️ Clone cancel ho gaya. Jo adhoora group bana wo "
+                "aap delete kar sakte ho.")
             raise
         except Exception as e:
-            await event.respond(f"Error aa gaya: `{e}`")
+            await _safe_respond(event, f"Error aa gaya: {e}")
             return
 
         msg = (
@@ -516,7 +550,7 @@ async def _run_clone(event, uid, client, source, transform, mode_note):
         if skipped:
             details = "\n".join(f"• {s}" for s in skipped[:10])
             msg += f"\n\n⚠️ {len(skipped)} cheezein skip hui:\n{details}"
-        await event.respond(msg)
+        await _safe_respond(event, msg)
     finally:
         active_tasks.pop(uid, None)
 
