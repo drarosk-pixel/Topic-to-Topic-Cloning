@@ -53,6 +53,7 @@ bot = TelegramClient("bot_session", config.API_ID, config.API_HASH)
 user_states = {}    # uid -> {"step": ..., ...}
 user_clients = {}   # uid -> authorized userbot TelegramClient
 login_tmp = {}      # uid -> temp client during the login handshake
+active_tasks = {}   # uid -> asyncio.Task of a running clone (for /cancel)
 
 
 HELP_TEXT = (
@@ -102,14 +103,29 @@ async def cmd_help(event):
 @bot.on(events.NewMessage(pattern=r"^/cancel\b"))
 async def cmd_cancel(event):
     uid = event.sender_id
-    user_states.pop(uid, None)
+    did_something = False
+
+    # 1) Stop a running clone, if any.
+    task = active_tasks.get(uid)
+    if task is not None and not task.done():
+        task.cancel()
+        did_something = True
+
+    # 2) Drop any pending login/clone conversation state.
+    if user_states.pop(uid, None) is not None:
+        did_something = True
     tmp = login_tmp.pop(uid, None)
     if tmp is not None:
         try:
             await tmp.disconnect()
         except Exception:
             pass
-    await event.respond("Thik hai, cancel kar diya.")
+        did_something = True
+
+    if did_something:
+        await event.respond("⏹️ Cancel kar diya.")
+    else:
+        await event.respond("Abhi kuch chal nahi raha tha cancel karne ko.")
 
 
 @bot.on(events.NewMessage(pattern=r"^/login\b"))
@@ -421,6 +437,12 @@ async def _handle_source(event, uid, text):
         await event.respond("Pehle /login karo.")
         return
 
+    existing = active_tasks.get(uid)
+    if existing is not None and not existing.done():
+        await event.respond("Ek clone already chal raha hai ⏳. "
+                            "Use /cancel karo ya khatam hone do.")
+        return
+
     raw = text.strip().split()[0]
     source = raw
     if re.fullmatch(r"-?\d+", raw):
@@ -435,47 +457,68 @@ async def _handle_source(event, uid, text):
         transform = None
         mode_note = "⚡ Forward mode (exact copy)"
 
-    status = await event.respond(f"Clone shuru kar raha hoon...\n{mode_note}")
+    # Run the clone as a background task so the bot stays responsive and
+    # /cancel can actually stop it.
+    task = asyncio.create_task(
+        _run_clone(event, uid, client, source, transform, mode_note))
+    active_tasks[uid] = task
 
-    async def progress(stage, info):
-        try:
-            if stage == "create":
-                await status.edit(f"🆕 Naya group bana raha hoon: "
-                                  f"**{info['title']}**")
-            elif stage == "topic":
-                await status.edit(f"🧵 Topic bana: {info['title']}")
-            elif stage == "messages":
-                bar = _progress_bar(info["index"], info["topics_total"])
-                await status.edit(
-                    f"📋 Cloning...\n\n"
-                    f"{bar}\n"
-                    f"Topics: {info['index']}/{info['topics_total']}\n"
-                    f"Abhi hua: **{info['title']}** ({info['count']} msgs)\n"
-                    f"Total messages: **{info['total']}**"
-                )
-        except Exception:
-            pass
 
+async def _run_clone(event, uid, client, source, transform, mode_note):
     try:
-        dest, total, skipped = await clone_forum(
-            client, source, progress,
-            sleep_between=config.SLEEP_BETWEEN,
-            sleep_per_topic=config.SLEEP_PER_TOPIC,
-            transform=transform,
-        )
-    except Exception as e:
-        await event.respond(f"Error aa gaya: `{e}`")
-        return
+        status = await event.respond(
+            f"Clone shuru kar raha hoon...\n{mode_note}\n"
+            f"(Rokna ho to /cancel bhejo.)")
 
-    msg = (
-        f"✅ Done!\nNaya group: **{dest.title}**\n"
-        f"Total messages copy hue: **{total}**\n\n"
-        f"Group aapke account me khul gaya hoga (aap owner ho)."
-    )
-    if skipped:
-        details = "\n".join(f"• {s}" for s in skipped[:10])
-        msg += f"\n\n⚠️ {len(skipped)} cheezein skip hui:\n{details}"
-    await event.respond(msg)
+        async def progress(stage, info):
+            try:
+                if stage == "create":
+                    await status.edit(f"🆕 Naya group bana raha hoon: "
+                                      f"**{info['title']}**")
+                elif stage == "topic":
+                    await status.edit(f"🧵 Topic bana: {info['title']}")
+                elif stage == "messages":
+                    bar = _progress_bar(info["index"], info["topics_total"])
+                    await status.edit(
+                        f"📋 Cloning...\n\n"
+                        f"{bar}\n"
+                        f"Topics: {info['index']}/{info['topics_total']}\n"
+                        f"Abhi hua: **{info['title']}** ({info['count']} msgs)\n"
+                        f"Total messages: **{info['total']}**"
+                    )
+            except Exception:
+                pass
+
+        try:
+            dest, total, skipped = await clone_forum(
+                client, source, progress,
+                sleep_between=config.SLEEP_BETWEEN,
+                sleep_per_topic=config.SLEEP_PER_TOPIC,
+                transform=transform,
+            )
+        except asyncio.CancelledError:
+            try:
+                await event.respond(
+                    "⏹️ Clone cancel ho gaya. Jo adhoora group bana wo aap "
+                    "delete kar sakte ho.")
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            await event.respond(f"Error aa gaya: `{e}`")
+            return
+
+        msg = (
+            f"✅ Done!\nNaya group: **{dest.title}**\n"
+            f"Total messages copy hue: **{total}**\n\n"
+            f"Group aapke account me khul gaya hoga (aap owner ho)."
+        )
+        if skipped:
+            details = "\n".join(f"• {s}" for s in skipped[:10])
+            msg += f"\n\n⚠️ {len(skipped)} cheezein skip hui:\n{details}"
+        await event.respond(msg)
+    finally:
+        active_tasks.pop(uid, None)
 
 
 # --------------------------------------------------------------------------- #
