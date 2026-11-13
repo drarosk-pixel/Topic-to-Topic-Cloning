@@ -34,7 +34,17 @@ from telethon.errors import (
 
 import config
 import session_store
+import rules_store
+import rules as rules_mod
 from cloner import clone_forum
+
+
+def _get_rules(uid):
+    return rules_mod.normalize(rules_store.load(config.RULES_FILE, uid))
+
+
+def _save_rules(uid, r):
+    rules_store.save(config.RULES_FILE, uid, r)
 
 
 bot = TelegramClient("bot_session", config.API_ID, config.API_HASH)
@@ -51,9 +61,23 @@ HELP_TEXT = (
     "(session string ki zarurat nahi).\n"
     "2. /clone  - source forum group ki `-100...` id bhejo, bot hubohu "
     "copy bana dega (title, topics, aur har topic ka content).\n\n"
+    "**Content editing rules (optional):**\n"
+    "Jab koi rule set ho, bot copy mode me jaata hai aur caption edit karta "
+    "hai (media phir bhi bina download reuse hota hai).\n"
+    "• /rules — current rules dekho\n"
+    "• /caption <text> — har message me caption add karo (khali = hatao)\n"
+    "• /captionpos top|bottom — caption upar ya neeche\n"
+    "• /replaceword purana | naya — word replace\n"
+    "• /removeword word — word hatao\n"
+    "• /replacelink purana | naya — link/URL ka text replace\n"
+    "• /removelinks on|off — saare hyperlink hatao (text rehne do)\n"
+    "• /removelinkline on|off — jis line me link ho (chhupa hua bhi) poori "
+    "line hatao\n"
+    "• /removewordline word — jis line me ye word ho poori line hatao\n"
+    "• /clearrules — saare rules reset\n\n"
     "Baaki: /logout  /cancel  /help\n\n"
     "Note: Source group me forwarding on honi chahiye (content protected "
-    "nahi), tabhi server-side copy bina download/upload ke hoga."
+    "nahi), tabhi copy bina download/upload ke hoga."
 )
 
 
@@ -133,6 +157,158 @@ async def cmd_clone(event):
         "Source forum group ki id bhejo (jaise `-1001234567890`).\n"
         "Dhyan: aapka userbot us group ka member hona chahiye."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Content-rule commands
+# --------------------------------------------------------------------------- #
+def _arg(raw_text):
+    """Everything after the command word, stripped."""
+    parts = raw_text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _onoff(val, default=False):
+    v = val.strip().lower()
+    if v in ("on", "yes", "true", "1"):
+        return True
+    if v in ("off", "no", "false", "0"):
+        return False
+    return default
+
+
+@bot.on(events.NewMessage(pattern=r"^/rules\b"))
+async def cmd_rules(event):
+    r = _get_rules(event.sender_id)
+    lines = ["**Aapke current rules:**"]
+    lines.append(f"• Caption: {r['caption'] or '(none)'} "
+                 f"[{r['caption_pos']}]")
+    lines.append(f"• Remove all hyperlinks: "
+                 f"{'ON' if r['remove_all_links'] else 'off'}")
+    lines.append(f"• Remove lines with links: "
+                 f"{'ON' if r['remove_link_lines'] else 'off'}")
+    lines.append(f"• Word replace/remove: {r['word_replacements'] or '(none)'}")
+    lines.append(f"• Link replace: {r['link_replacements'] or '(none)'}")
+    lines.append(f"• Remove lines with words: "
+                 f"{r['remove_word_lines'] or '(none)'}")
+    mode = "COPY mode (edit)" if rules_mod.has_any(r) else "FORWARD mode (exact)"
+    lines.append(f"\nClone chalega: **{mode}**")
+    await event.respond("\n".join(lines))
+
+
+@bot.on(events.NewMessage(pattern=r"^/clearrules\b"))
+async def cmd_clearrules(event):
+    rules_store.clear(config.RULES_FILE, event.sender_id)
+    await event.respond("Saare rules reset ho gaye. Ab clone exact (forward) "
+                        "mode me chalega.")
+
+
+@bot.on(events.NewMessage(pattern=r"^/caption\b"))
+async def cmd_caption(event):
+    uid = event.sender_id
+    r = _get_rules(uid)
+    r["caption"] = _arg(event.raw_text)
+    _save_rules(uid, r)
+    if r["caption"]:
+        await event.respond(f"Caption set ho gaya ({r['caption_pos']}):\n"
+                            f"{r['caption']}")
+    else:
+        await event.respond("Caption hata diya.")
+
+
+@bot.on(events.NewMessage(pattern=r"^/captionpos\b"))
+async def cmd_captionpos(event):
+    uid = event.sender_id
+    pos = _arg(event.raw_text).lower()
+    if pos not in ("top", "bottom"):
+        await event.respond("Use: /captionpos top  ya  /captionpos bottom")
+        return
+    r = _get_rules(uid)
+    r["caption_pos"] = pos
+    _save_rules(uid, r)
+    await event.respond(f"Caption position: {pos}")
+
+
+@bot.on(events.NewMessage(pattern=r"^/replaceword\b"))
+async def cmd_replaceword(event):
+    uid = event.sender_id
+    arg = _arg(event.raw_text)
+    if "|" not in arg:
+        await event.respond("Use: /replaceword purana | naya")
+        return
+    old, new = [p.strip() for p in arg.split("|", 1)]
+    if not old:
+        await event.respond("Purana word khali nahi ho sakta.")
+        return
+    r = _get_rules(uid)
+    r["word_replacements"].append([old, new])
+    _save_rules(uid, r)
+    await event.respond(f"Rule add: '{old}' -> '{new}'")
+
+
+@bot.on(events.NewMessage(pattern=r"^/removeword\b"))
+async def cmd_removeword(event):
+    uid = event.sender_id
+    word = _arg(event.raw_text)
+    if not word:
+        await event.respond("Use: /removeword word")
+        return
+    r = _get_rules(uid)
+    r["word_replacements"].append([word, ""])
+    _save_rules(uid, r)
+    await event.respond(f"Word hataya jayega: '{word}'")
+
+
+@bot.on(events.NewMessage(pattern=r"^/replacelink\b"))
+async def cmd_replacelink(event):
+    uid = event.sender_id
+    arg = _arg(event.raw_text)
+    if "|" not in arg:
+        await event.respond("Use: /replacelink purana | naya\n"
+                            "(jaise: /replacelink t.me/old | t.me/new)")
+        return
+    old, new = [p.strip() for p in arg.split("|", 1)]
+    if not old:
+        await event.respond("Purana link khali nahi ho sakta.")
+        return
+    r = _get_rules(uid)
+    r["link_replacements"].append([old, new])
+    _save_rules(uid, r)
+    await event.respond(f"Link rule add: '{old}' -> '{new}'")
+
+
+@bot.on(events.NewMessage(pattern=r"^/removelinks\b"))
+async def cmd_removelinks(event):
+    uid = event.sender_id
+    r = _get_rules(uid)
+    r["remove_all_links"] = _onoff(_arg(event.raw_text), not r["remove_all_links"])
+    _save_rules(uid, r)
+    await event.respond(f"Remove all hyperlinks: "
+                        f"{'ON' if r['remove_all_links'] else 'off'}")
+
+
+@bot.on(events.NewMessage(pattern=r"^/removelinkline\b"))
+async def cmd_removelinkline(event):
+    uid = event.sender_id
+    r = _get_rules(uid)
+    r["remove_link_lines"] = _onoff(_arg(event.raw_text),
+                                    not r["remove_link_lines"])
+    _save_rules(uid, r)
+    await event.respond(f"Remove lines containing links: "
+                        f"{'ON' if r['remove_link_lines'] else 'off'}")
+
+
+@bot.on(events.NewMessage(pattern=r"^/removewordline\b"))
+async def cmd_removewordline(event):
+    uid = event.sender_id
+    word = _arg(event.raw_text)
+    if not word:
+        await event.respond("Use: /removewordline word")
+        return
+    r = _get_rules(uid)
+    r["remove_word_lines"].append(word)
+    _save_rules(uid, r)
+    await event.respond(f"Jis line me '{word}' hoga wo poori line hategi.")
 
 
 # --------------------------------------------------------------------------- #
@@ -250,7 +426,16 @@ async def _handle_source(event, uid, text):
     if re.fullmatch(r"-?\d+", raw):
         source = int(raw)
 
-    status = await event.respond("Clone shuru kar raha hoon...")
+    # Build the caption transform from this user's rules (if any).
+    r = _get_rules(uid)
+    if rules_mod.has_any(r):
+        transform = lambda t, _r=r: rules_mod.apply_rules(t, _r)
+        mode_note = "✏️ Copy mode (rules apply ho rahe hain)"
+    else:
+        transform = None
+        mode_note = "⚡ Forward mode (exact copy)"
+
+    status = await event.respond(f"Clone shuru kar raha hoon...\n{mode_note}")
 
     async def progress(stage, info):
         try:
@@ -276,6 +461,7 @@ async def _handle_source(event, uid, text):
             client, source, progress,
             sleep_between=config.SLEEP_BETWEEN,
             sleep_per_topic=config.SLEEP_PER_TOPIC,
+            transform=transform,
         )
     except Exception as e:
         await event.respond(f"Error aa gaya: `{e}`")

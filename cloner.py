@@ -175,12 +175,69 @@ async def get_all_topics(client, channel):
     return topics
 
 
+async def _forward_group(client, source, dest, group, top):
+    """Exact server-side forward of a message/album (no text edits)."""
+    ids = [x.id for x in group]
+    fwd_cls = _resolve_request(functions.messages,
+                               "ForwardMessagesRequest", "ForwardMessages")
+    await _flood(lambda: client(_mk(
+        fwd_cls,
+        from_peer=source,
+        to_peer=dest,
+        id=ids,
+        random_id=[helpers.generate_random_long() for _ in ids],
+        top_msg_id=top,
+        drop_author=True,           # clean copy, no "forwarded from"
+        drop_media_captions=False,  # keep captions exactly
+    )))
+    return len(ids)
+
+
+async def _copy_group(client, dest, group, top, transform):
+    """Re-send a message/album with a transformed caption.
+
+    Media is reused by reference (no download/upload). Only the caption text
+    is rebuilt through `transform`.
+    """
+    # Caption comes from whichever message in the group carries text.
+    raw = ""
+    for m in group:
+        if getattr(m, "text", None):
+            raw = m.text  # markdown (client.parse_mode == 'markdown')
+            break
+    new_text = transform(raw)
+
+    medias = [m.media for m in group
+              if getattr(m, "media", None) is not None
+              and not isinstance(m.media, types.MessageMediaWebPage)]
+
+    if medias:
+        if len(medias) == 1:
+            await _flood(lambda: client.send_file(
+                dest, medias[0], caption=new_text, reply_to=top))
+        else:
+            caps = [new_text] + [""] * (len(medias) - 1)
+            await _flood(lambda: client.send_file(
+                dest, medias, caption=caps, reply_to=top))
+        return len(group)
+
+    # Text-only message (or link-preview message): nothing to send if empty.
+    if not new_text.strip():
+        return 0
+    await _flood(lambda: client.send_message(
+        dest, new_text, reply_to=top, link_preview=False))
+    return 1
+
+
 async def _forward_topic_messages(client, source, dest, src_topic_id,
-                                  dest_topic_id, sleep_between):
+                                  dest_topic_id, sleep_between, transform=None):
     """Copy all real messages of one source topic into the dest topic.
 
-    Albums (grouped media) are forwarded together so they stay as one album.
-    Service messages (topic created / pinned / joined etc.) are skipped.
+    If `transform` is None -> exact server-side forward (fast).
+    If `transform` is given -> copy mode: media reused by reference, caption
+    rebuilt through `transform` (so links/words/lines/captions can change).
+
+    Albums stay grouped. Service messages are skipped.
     Returns the number of messages copied.
     """
     msgs = []
@@ -201,36 +258,26 @@ async def _forward_topic_messages(client, source, dest, src_topic_id,
         m = msgs[i]
         gid = getattr(m, "grouped_id", None)
         if gid:
-            batch = [m]
+            group = [m]
             j = i + 1
             while j < n and getattr(msgs[j], "grouped_id", None) == gid:
-                batch.append(msgs[j])
+                group.append(msgs[j])
                 j += 1
-            ids = [x.id for x in batch]
             i = j
         else:
-            ids = [m.id]
+            group = [m]
             i += 1
 
-        fwd_cls = _resolve_request(functions.messages,
-                                   "ForwardMessagesRequest", "ForwardMessages")
-        await _flood(lambda ids=ids, top=top, fwd_cls=fwd_cls: client(_mk(
-            fwd_cls,
-            from_peer=source,
-            to_peer=dest,
-            id=ids,
-            random_id=[helpers.generate_random_long() for _ in ids],
-            top_msg_id=top,
-            drop_author=True,          # clean copy, no "forwarded from"
-            drop_media_captions=False,  # keep captions exactly
-        )))
-        copied += len(ids)
+        if transform is None:
+            copied += await _forward_group(client, source, dest, group, top)
+        else:
+            copied += await _copy_group(client, dest, group, top, transform)
         await asyncio.sleep(sleep_between)
     return copied
 
 
 async def clone_forum(client, source_id, progress_cb,
-                      sleep_between=0.6, sleep_per_topic=0.5):
+                      sleep_between=0.6, sleep_per_topic=0.5, transform=None):
     """Clone a whole forum/topic group into a brand new one.
 
     Parameters
@@ -238,9 +285,16 @@ async def clone_forum(client, source_id, progress_cb,
     client        : authorized Telethon userbot client
     source_id     : -100... id (or @username) of the source forum group
     progress_cb   : async callable(stage: str, info: dict) for UI updates
+    transform     : optional callable(text)->text applied to each caption.
+                    When given, cloning switches to copy mode (editable text);
+                    when None, exact server-side forwarding is used.
 
-    Returns the created destination chat and total messages copied.
+    Returns (destination chat, total messages copied, skipped list).
     """
+    # Markdown so captions round-trip as editable [text](url), **bold**, etc.
+    if transform is not None:
+        client.parse_mode = "markdown"
+
     source = await client.get_entity(source_id)
 
     if not getattr(source, "forum", False):
@@ -314,7 +368,8 @@ async def clone_forum(client, source_id, progress_cb,
         count = 0
         try:
             count = await _forward_topic_messages(
-                client, source, dest, t.id, dest_topic, sleep_between)
+                client, source, dest, t.id, dest_topic, sleep_between,
+                transform=transform)
             total += count
         except Exception as e:
             skipped.append(f"messages copy '{t.title}': {e}")

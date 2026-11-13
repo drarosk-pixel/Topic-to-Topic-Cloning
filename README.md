@@ -71,6 +71,30 @@ Baaki commands: `/logout`, `/cancel`, `/help`.
   rakho — `.gitignore` me already hai.
 - `.env` aur `*.session` files bhi commit mat karna.
 
+## Content editing rules (optional)
+
+By default cloning uses exact server-side **forward mode**. If you set any of
+the rules below, the bot switches to **copy mode**: media is still re-used by
+reference (no download/upload), but each caption is rebuilt so links/words/
+lines can be changed and a caption can be added.
+
+| Command | Kaam |
+|---------|------|
+| `/rules` | Current rules + active mode dekho |
+| `/caption <text>` | Har message me caption add (khali = hatao) |
+| `/captionpos top\|bottom` | Caption upar ya neeche |
+| `/replaceword purana \| naya` | Word replace |
+| `/removeword word` | Word hatao |
+| `/replacelink purana \| naya` | Link/URL ka text replace |
+| `/removelinks on\|off` | Saare hyperlink hatao (visible text rehne do) |
+| `/removelinkline on\|off` | Jis line me link ho (chhupa hua bhi) poori line hatao |
+| `/removewordline word` | Jis line me ye word ho poori line hatao |
+| `/clearrules` | Saare rules reset |
+
+Rules per-user `rules.json` me save hote hain. Copy mode captions markdown
+(`[text](url)`, `**bold**`) ke roop me process karta hai; bahut exotic
+formatting (spoiler/underline) copy mode me kabhi-kabhi simplify ho sakti hai.
+
 ## Limitations
 
 - Sirf **forum/topic groups** (Topics enabled) copy hote hain, normal groups
